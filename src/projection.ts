@@ -38,7 +38,7 @@ export const PROJECTION_SHORTER_REASON = "Raw context is shorter than the projec
 
 export type EstimateUnit = "characters" | "tokens";
 
-/** One source message's content digest plus the `time.updated` captured with it. */
+/** One source message's content digest plus the write time captured with it. */
 export interface SourceStamp {
 	digest: string;
 	updatedAt: number;
@@ -54,7 +54,7 @@ export interface ProjectionCheckpoint {
 	/** `digestSourcePrefix` of those messages. */
 	sourceDigest: string;
 	/**
-	 * Per-message digest and captured `time.updated` (length is sourceMessageCount). Lets a
+	 * Per-message digest and captured write time (length is sourceMessageCount). Lets a
 	 * mismatch be attributed to specific messages and a late OpenCode write of the tail be
 	 * re-anchored instead of dropped; absent on checkpoints written by older versions.
 	 */
@@ -122,7 +122,7 @@ export function digestSourceMessage(message: LiveContextMessage): string {
 	return digestMessages([sourceDigestForm(message)]);
 }
 
-/** A message's stamp: its content digest and the `time.updated` OpenCode last wrote. */
+/** A message's stamp: its content digest and the write time OpenCode last wrote. */
 export function sourceStamp(message: LiveContextMessage): SourceStamp {
 	return {
 		digest: digestSourceMessage(message),
@@ -206,11 +206,12 @@ export function applyProjection(
 
 /**
  * A mismatch OpenCode itself caused. Every changed message must have been rewritten after
- * the checkpoint captured it (`updatedAt` moved past the stamp): that is the tail of the
- * current turn still being finalized, not a revert, a compaction or a foreign transform —
- * those change ids or content without moving `updatedAt`, and stay fail-closed. The anchor
- * is trimmed to the last stable message; the trimmed tail becomes ordinary suffix, the same
- * contract as pi-clm's rebasing for appended messages.
+ * the checkpoint captured it (its write time — `time.completed`/`updated`, not `created` —
+ * moved past the stamp): that is the tail of the current turn still being finalized, not a
+ * revert, a compaction or a foreign transform — those change ids or content without moving
+ * the write time, and stay fail-closed. The anchor is trimmed to the last stable message;
+ * the trimmed tail becomes ordinary suffix, the same contract as pi-clm's rebasing for
+ * appended messages.
  */
 function reanchorTail(
 	rawMessages: readonly LiveContextMessage[],

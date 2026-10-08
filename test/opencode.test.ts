@@ -112,13 +112,13 @@ describe("flatten", () => {
 		expect(digestSourcePrefix(flatten([message, only]))).toBe(digestSourcePrefix(flat));
 	});
 
-	test("flat messages carry the updatedAt write marker, falling back to created", () => {
+	test("flat messages carry the write marker: updated, else completed, else created", () => {
 		const raw = conversation();
 		raw[0]!.info.time = { created: 111, updated: 222 };
 		const flat = flatten(raw);
 		expect(flat.find((message) => message.ocMessageID === "msg_u1")!.updatedAt).toBe(222);
-		// The assistant fixture has only `created`, so updatedAt falls back to it.
-		expect(flat.find((message) => message.ocMessageID === "msg_a1")!.updatedAt).toBe(2);
+		// The assistant fixture has completed=3, which wins over created=2.
+		expect(flat.find((message) => message.ocMessageID === "msg_a1")!.updatedAt).toBe(3);
 	});
 });
 

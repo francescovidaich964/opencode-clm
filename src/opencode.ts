@@ -28,8 +28,8 @@
  * Flattening never depends on settings: the projection digest is computed from it, and a
  * settings toggle must not discard an accepted revision. Reasoning is always flattened;
  * `withoutReasoning` hides it from the mirror view only. Every flat message carries
- * `updatedAt` (`info.time.updated`, falling back to `created`), OpenCode's in-place write
- * marker: digests exclude it (`canonicalMessage`), and the projection reads it only to
+ * `updatedAt` (`info.time.updated`, else `completed`, else `created`), OpenCode's in-place
+ * write marker: digests exclude it (`canonicalMessage`), and the projection reads it only to
  * re-anchor a late rewrite of the tail instead of dropping the revision (projection.ts).
  *
  * Known gap: an assistant message whose only sendable parts are empty text parts has no
@@ -128,7 +128,9 @@ export function flatten(messages: readonly OcMessage[]): LiveContextMessage[] {
 		if (!sentToModel(message)) continue;
 		const id = message.info.id;
 		const timestamp = Number(message.info.time?.created ?? 0);
-		const updatedAt = Number(message.info.time?.updated ?? message.info.time?.created ?? 0);
+		// OpenCode writes `completed` (and, on some hosts, `updated`); both move when a message
+		// is written in place, `created` does not.
+		const updatedAt = Number(message.info.time?.updated ?? message.info.time?.completed ?? message.info.time?.created ?? 0);
 		if (message.info.role === "user") {
 			const content = userContent(message);
 			if (content.length > 0) out.push({ role: "user", content, ocMessageID: id, timestamp, updatedAt });
