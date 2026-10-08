@@ -54,7 +54,10 @@ function normalizeJson(value: unknown): unknown {
 }
 
 export function canonicalMessage(message: LiveContextMessage): string {
-	return JSON.stringify(normalizeJson(message));
+	// `updatedAt` is OpenCode write metadata, not content: OpenCode rewrites it in place while
+	// a message is still being finalized, so it must not reach any digest or block id.
+	const { updatedAt: _updatedAt, ...rest } = message;
+	return JSON.stringify(normalizeJson(rest));
 }
 
 export function digestMessages(messages: LiveContextMessage[]): string {

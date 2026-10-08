@@ -194,9 +194,19 @@ error is a line in `events.jsonl`.
   if its raw prefix still validates. An unusable state file starts the session clean with
   a toast.
 - **Anchor.** The digest covers the flattened raw prefix with tool-result content left
-  out, plus each message's OpenCode id. OpenCode's prune (which clears old tool output in
+  out, plus each message's OpenCode id and a per-message stamp (its digest and the
+  `time.updated` captured with it). OpenCode's prune (which clears old tool output in
   place) therefore does not discard a checkpoint; a revert removes messages, changes the
   ids, and drops it.
+- **Tail re-anchoring.** OpenCode keeps writing message objects after the transform returns
+  (an assistant message being finalized, turn diffs attached to the user message), so a
+  checkpoint taken mid-turn digests a tail that is still changing. When the whole-prefix
+  digest no longer matches but every changed message moved its `time.updated` past the
+  captured stamp — OpenCode itself rewrote it — the anchor is trimmed to the last stable
+  message and the trimmed tail flows as ordinary suffix, with a `reanchored` event. This is
+  the same contract as pi-clm's rebasing for appended messages; the revision is not
+  dropped and the model gets no notice. Anything else (a revert, a compaction, another
+  plugin rewriting in memory, which does not move `time.updated`) still fails closed.
 - **Revert and fork.** Each accepted checkpoint is also kept in `checkpoints/rN.json` (the
   newest 8). When the active revision no longer fits (a revert cut into its prefix), the
   newest older checkpoint that still fits becomes the next revision, with a notice and a
@@ -205,9 +215,10 @@ error is a line in `events.jsonl`.
   whose source the fork starts with (compared without message ids). `/clm reset` clears
   the history. The fork's first request also copies the origin's annotations made up to the
   fork point, their sources re-pointed at the fork's copies of the messages.
-- Any other prefix mismatch drops the revision: the next request carries the stored
-  history, and the model gets a notice. Two consecutive drops add a warning that edits
-  keep being dropped until the start of the history stops changing.
+- Any other prefix mismatch (or a mismatch on a checkpoint without stamps) drops the
+  revision: the next request carries the stored history, and the model gets a notice. Two
+  consecutive drops add a warning that edits keep being dropped until the start of the
+  history stops changing.
 - **OpenCode compaction.** `experimental.session.compacting` marks the session and appends
   an instruction plus the active annotations to the compaction prompt, asking the
   summarizer to copy them word for word. The compaction's own `messages.transform` call
@@ -220,9 +231,10 @@ error is a line in `events.jsonl`.
 A checkpoint anchors to the digest of the messages this plugin receives. OpenCode runs a
 hook in each plugin in turn, built-in plugins first, then the configured ones in load
 order, all on the same output; a plugin whose `messages.transform` runs earlier and varies
-its output between calls invalidates the checkpoint. After two consecutive drops the
-plugin toasts once per session, naming that cause and advising to load opencode-clm before
-such a plugin.
+its output between calls invalidates the checkpoint (its in-memory rewrite does not move
+`time.updated`, so tail re-anchoring cannot cover it and it fails closed). After two
+consecutive drops the plugin toasts once per session, naming that cause and advising to
+load opencode-clm before such a plugin.
 
 ## 7. Budget and reminders
 

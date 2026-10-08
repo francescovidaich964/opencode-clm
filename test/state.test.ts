@@ -85,6 +85,11 @@ describe("state validation", () => {
 		expect(isProjectionCheckpoint(checkpoint())).toBe(true);
 	});
 
+	test("accepts a checkpoint without per-message stamps (an older version)", () => {
+		const { sourceStamps: _stamps, ...older } = checkpoint();
+		expect(isProjectionCheckpoint(older)).toBe(true);
+	});
+
 	test.each([
 		["missing version", { enabled: true, revision: 0 }],
 		["foreign version", { version: 2, enabled: true, revision: 0 }],
@@ -114,6 +119,9 @@ describe("state validation", () => {
 		["missing sourceIds", { sourceIds: undefined }],
 		["sourceIds length unlike count", { sourceIds: ["msg_1"] }],
 		["non-string source id", { sourceIds: ["msg_1", 2] }],
+		["stamps length unlike count", { sourceStamps: [{ digest: "a".repeat(64), updatedAt: 1 }] }],
+		["stamp digest not hex", { sourceStamps: [{ digest: "nope", updatedAt: 1 }, { digest: "a".repeat(64), updatedAt: 1 }] }],
+		["stamp updatedAt not finite", { sourceStamps: [{ digest: "a".repeat(64), updatedAt: "now" }, { digest: "a".repeat(64), updatedAt: 1 }] }],
 		["numeric content", { projectedMessages: [{ role: "user", content: 5 }, { role: "user", content: "x" }] }],
 		["untyped content part", { projectedMessages: [{ role: "user", content: [{ text: "x" }] }, { role: "user", content: "x" }] }],
 	])("rejects a checkpoint with %s", (_name, patch) => {
@@ -254,6 +262,21 @@ describe("budgetCheck", () => {
 		expect(loaded.state).toEqual(state);
 		expect(loaded.warning).toBeUndefined();
 		expect(loaded.repaired).toContain("invalid budgetCheck");
+		await rm(directory, { recursive: true, force: true });
+	});
+
+	test("malformed sourceStamps are dropped; the rest of the state is kept", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "clm-state-"));
+		const state = applied(3);
+		const broken = structuredClone(state);
+		broken.checkpoint!.sourceStamps = [{ digest: "nope", updatedAt: 1 }];
+		await writeFile(join(directory, STATE_FILE), JSON.stringify(broken));
+		const loaded = await loadLiveContextState(directory);
+		const expected = structuredClone(state);
+		delete expected.checkpoint!.sourceStamps;
+		expect(loaded.state).toEqual(expected);
+		expect(loaded.warning).toBeUndefined();
+		expect(loaded.repaired).toContain("invalid sourceStamps");
 		await rm(directory, { recursive: true, force: true });
 	});
 });

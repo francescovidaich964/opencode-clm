@@ -27,7 +27,10 @@
  *   "[Tool execution was interrupted]".
  * Flattening never depends on settings: the projection digest is computed from it, and a
  * settings toggle must not discard an accepted revision. Reasoning is always flattened;
- * `withoutReasoning` hides it from the mirror view only.
+ * `withoutReasoning` hides it from the mirror view only. Every flat message carries
+ * `updatedAt` (`info.time.updated`, falling back to `created`), OpenCode's in-place write
+ * marker: digests exclude it (`canonicalMessage`), and the projection reads it only to
+ * re-anchor a late rewrite of the tail instead of dropping the revision (projection.ts).
  *
  * Known gap: an assistant message whose only sendable parts are empty text parts has no
  * flat form and is left out of the request. OpenCode sends it as an empty assistant turn.
@@ -125,9 +128,10 @@ export function flatten(messages: readonly OcMessage[]): LiveContextMessage[] {
 		if (!sentToModel(message)) continue;
 		const id = message.info.id;
 		const timestamp = Number(message.info.time?.created ?? 0);
+		const updatedAt = Number(message.info.time?.updated ?? message.info.time?.created ?? 0);
 		if (message.info.role === "user") {
 			const content = userContent(message);
-			if (content.length > 0) out.push({ role: "user", content, ocMessageID: id, timestamp });
+			if (content.length > 0) out.push({ role: "user", content, ocMessageID: id, timestamp, updatedAt });
 			continue;
 		}
 		const content: Record<string, unknown>[] = [];
@@ -147,11 +151,12 @@ export function flatten(messages: readonly OcMessage[]): LiveContextMessage[] {
 					isError: output.isError,
 					ocMessageID: id,
 					timestamp,
+					updatedAt,
 				});
 			}
 		}
 		if (content.length === 0) continue;
-		out.push({ role: "assistant", content, ocMessageID: id, timestamp });
+		out.push({ role: "assistant", content, ocMessageID: id, timestamp, updatedAt });
 		out.push(...results);
 	}
 	return out;

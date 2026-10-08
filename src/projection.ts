@@ -13,6 +13,15 @@
 // whole messages (ids change) or truncates the parts of a kept message (its toolCall and
 // toolResult disappear, so the digest changes); both still fail closed.
 //
+// One mismatch source is OpenCode's own late writes: it keeps updating message objects
+// after `experimental.chat.messages.transform` returns (an assistant message being
+// finalized, turn diffs attached to a user message). A checkpoint taken mid-turn digests
+// those still-mutable tail messages, and the late write flips the digest. `sourceStamps`
+// (per-message digest + captured `time.updated`) lets `applyProjection` attribute such a
+// mismatch to a post-capture OpenCode write and re-anchor the checkpoint to the stable
+// head instead of dropping the revision (see `reanchorTail`); anything not attributable
+// stays fail-closed.
+//
 // pi-clm's `recoverProjectionFromRetryErrors` is not ported. Pi writes failed assistant
 // responses to its session log but drops them from live state, so a resumed log hashes
 // differently. OpenCode keeps the error on the assistant message (`info.error`), and the
@@ -29,6 +38,12 @@ export const PROJECTION_SHORTER_REASON = "Raw context is shorter than the projec
 
 export type EstimateUnit = "characters" | "tokens";
 
+/** One source message's content digest plus the `time.updated` captured with it. */
+export interface SourceStamp {
+	digest: string;
+	updatedAt: number;
+}
+
 export interface ProjectionCheckpoint {
 	version: 1;
 	revision: number;
@@ -38,6 +53,12 @@ export interface ProjectionCheckpoint {
 	sourceIds: string[];
 	/** `digestSourcePrefix` of those messages. */
 	sourceDigest: string;
+	/**
+	 * Per-message digest and captured `time.updated` (length is sourceMessageCount). Lets a
+	 * mismatch be attributed to specific messages and a late OpenCode write of the tail be
+	 * re-anchored instead of dropped; absent on checkpoints written by older versions.
+	 */
+	sourceStamps?: SourceStamp[];
 	projectedMessages: LiveContextMessage[];
 	beforeEstimate: number;
 	afterEstimate: number;
@@ -47,11 +68,21 @@ export interface ProjectionCheckpoint {
 	editTrace?: ContextEditTrace;
 }
 
+/** The trimmed anchor returned when a late tail rewrite was re-anchored instead of dropped. */
+export interface ProjectionReanchor {
+	sourceMessageCount: number;
+	sourceIds: string[];
+	sourceStamps: SourceStamp[];
+	sourceDigest: string;
+}
+
 export type ProjectionApplication =
 	| {
 			valid: true;
 			messages: LiveContextMessage[];
 			suffix: LiveContextMessage[];
+			/** Set when the anchor was trimmed to the stable head (see `reanchorTail`). */
+			reanchor?: ProjectionReanchor;
 	  }
 	| {
 			valid: false;
@@ -64,6 +95,18 @@ export function sourceMessageId(message: LiveContextMessage): string {
 	return typeof message.ocMessageID === "string" ? message.ocMessageID : "";
 }
 
+/** The prune-invariant form of one source message (see `digestSourcePrefix`). */
+function sourceDigestForm(message: LiveContextMessage): LiveContextMessage {
+	if (message.role !== "toolResult") return message;
+	return {
+		role: message.role,
+		toolCallId: message.toolCallId,
+		toolName: message.toolName,
+		isError: message.isError,
+		ocMessageID: message.ocMessageID,
+	};
+}
+
 /**
  * Digest a raw source prefix in a form OpenCode's prune cannot change: every `toolResult`
  * keeps only role, toolCallId, toolName, isError and ocMessageID. Content is dropped for
@@ -71,18 +114,20 @@ export function sourceMessageId(message: LiveContextMessage): string {
  * created and may be cleared when it is validated.
  */
 export function digestSourcePrefix(messages: readonly LiveContextMessage[]): string {
-	return digestMessages(
-		messages.map((message) => {
-			if (message.role !== "toolResult") return message;
-			return {
-				role: message.role,
-				toolCallId: message.toolCallId,
-				toolName: message.toolName,
-				isError: message.isError,
-				ocMessageID: message.ocMessageID,
-			};
-		}),
-	);
+	return digestMessages(messages.map(sourceDigestForm));
+}
+
+/** `digestSourcePrefix` of one message: per-message attribution for tail re-anchoring. */
+export function digestSourceMessage(message: LiveContextMessage): string {
+	return digestMessages([sourceDigestForm(message)]);
+}
+
+/** A message's stamp: its content digest and the `time.updated` OpenCode last wrote. */
+export function sourceStamp(message: LiveContextMessage): SourceStamp {
+	return {
+		digest: digestSourceMessage(message),
+		updatedAt: typeof message.updatedAt === "number" ? message.updatedAt : 0,
+	};
 }
 
 /**
@@ -109,6 +154,7 @@ export function createProjectionCheckpoint(options: {
 		sourceMessageCount: options.sourceMessages.length,
 		sourceIds: options.sourceMessages.map(sourceMessageId),
 		sourceDigest: digestSourcePrefix(options.sourceMessages),
+		sourceStamps: options.sourceMessages.map(sourceStamp),
 		projectedMessages: [...options.projectedMessages],
 		beforeEstimate: options.beforeEstimate,
 		afterEstimate: options.afterEstimate,
@@ -124,7 +170,11 @@ export function createProjectionCheckpoint(options: {
 
 /**
  * Replace the checkpoint's raw source prefix and keep every raw message appended after
- * it. A mismatch fails closed and returns a copy of the untouched raw context.
+ * it. A mismatch fails closed and returns a copy of the untouched raw context — unless the
+ * checkpoint has per-message stamps and every changed message was written by OpenCode after
+ * it was captured (the current turn's tail still being finalized): then the anchor is
+ * trimmed to the stable head, the trimmed tail flows as ordinary suffix, and the caller
+ * persists `reanchor` on the checkpoint.
  */
 export function applyProjection(
 	rawMessages: readonly LiveContextMessage[],
@@ -147,8 +197,42 @@ export function applyProjection(
 		return { valid: false, messages: [...rawMessages], reason: PROJECTION_SOURCE_IDS_REASON };
 	}
 	if (digestSourcePrefix(prefix) !== checkpoint.sourceDigest) {
-		return { valid: false, messages: [...rawMessages], reason: PROJECTION_PREFIX_MISMATCH_REASON };
+		return reanchorTail(rawMessages, prefix, checkpoint) ??
+			{ valid: false, messages: [...rawMessages], reason: PROJECTION_PREFIX_MISMATCH_REASON };
 	}
 	const suffix = rawMessages.slice(checkpoint.sourceMessageCount);
 	return { valid: true, messages: [...checkpoint.projectedMessages, ...suffix], suffix };
+}
+
+/**
+ * A mismatch OpenCode itself caused. Every changed message must have been rewritten after
+ * the checkpoint captured it (`updatedAt` moved past the stamp): that is the tail of the
+ * current turn still being finalized, not a revert, a compaction or a foreign transform —
+ * those change ids or content without moving `updatedAt`, and stay fail-closed. The anchor
+ * is trimmed to the last stable message; the trimmed tail becomes ordinary suffix, the same
+ * contract as pi-clm's rebasing for appended messages.
+ */
+function reanchorTail(
+	rawMessages: readonly LiveContextMessage[],
+	prefix: readonly LiveContextMessage[],
+	checkpoint: ProjectionCheckpoint,
+): ProjectionApplication | undefined {
+	const stamps = checkpoint.sourceStamps;
+	if (!Array.isArray(stamps) || stamps.length !== prefix.length) return undefined;
+	const changed = prefix.map((message, index) => digestSourceMessage(message) !== stamps[index]!.digest);
+	const first = changed.indexOf(true);
+	if (first <= 0) return undefined;
+	const attributable = prefix.every((message, index) =>
+		!changed[index] || (typeof message.updatedAt === "number" && message.updatedAt > stamps[index]!.updatedAt),
+	);
+	if (!attributable) return undefined;
+	const stable = prefix.slice(0, first);
+	const reanchor: ProjectionReanchor = {
+		sourceMessageCount: stable.length,
+		sourceIds: stable.map(sourceMessageId),
+		sourceStamps: stable.map(sourceStamp),
+		sourceDigest: digestSourcePrefix(stable),
+	};
+	const suffix = rawMessages.slice(stable.length);
+	return { valid: true, messages: [...checkpoint.projectedMessages, ...suffix], suffix, reanchor };
 }

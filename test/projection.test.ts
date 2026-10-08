@@ -6,9 +6,11 @@ import { digestMessages } from "../src/context-document.ts";
 import {
 	applyProjection,
 	createProjectionCheckpoint,
+	digestSourceMessage,
 	digestSourcePrefix,
 	PROJECTION_PREFIX_MISMATCH_REASON,
 	PROJECTION_SOURCE_IDS_REASON,
+	sourceStamp,
 	type ProjectionCheckpoint,
 } from "../src/projection.ts";
 import type { LiveContextMessage } from "../src/types.ts";
@@ -61,6 +63,7 @@ describe("projection checkpoint", () => {
 			sourceMessageCount: 3,
 			sourceIds: ["msg_1", "msg_2", "msg_2"],
 			sourceDigest: digestSourcePrefix(raw),
+			sourceStamps: raw.map(sourceStamp),
 			projectedMessages: projected,
 			beforeEstimate: 1_200,
 			afterEstimate: 30,
@@ -120,6 +123,12 @@ describe("projection checkpoint", () => {
 		const left = [{ role: "user", content: "x", timestamp: 1 }];
 		const right = [{ timestamp: 1, content: "x", role: "user" }];
 		expect(digestMessages(left)).toBe(digestMessages(right));
+	});
+
+	test("the source digest ignores the updatedAt write marker", () => {
+		const stamped = raw.map((message) => ({ ...message, updatedAt: 99 }));
+		expect(digestSourcePrefix(stamped)).toBe(digestSourcePrefix(raw));
+		expect(digestSourceMessage(stamped[1]!)).toBe(digestSourceMessage(raw[1]!));
 	});
 
 	test("the source digest ignores tool result content and nothing else", () => {
@@ -259,5 +268,77 @@ describe("projection rebasing", () => {
 		const result = applyProjection(raw, empty);
 		expect(result.valid).toBe(true);
 		expect(result.messages).toHaveLength(raw.length + 1);
+	});
+});
+
+describe("tail re-anchoring", () => {
+	const at = Date.parse("2026-08-29T00:00:00.000Z");
+	const stamped: LiveContextMessage[] = [
+		{ role: "user", content: "task", ocMessageID: "msg_1", timestamp: 1, updatedAt: at - 10_000 },
+		{ role: "assistant", content: [{ type: "text", text: "still streaming" }], ocMessageID: "msg_2", timestamp: 2, updatedAt: at - 10_000 },
+	];
+
+	function stampedCheckpoint(): ProjectionCheckpoint {
+		return createProjectionCheckpoint({
+			revision: 1,
+			sourceMessages: stamped,
+			projectedMessages: [stamped[0]!, { role: "custom", customType: "clm-note", content: "summary" }],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+			createdAt: "2026-08-29T00:00:00.000Z",
+		});
+	}
+
+	test("re-anchors to the stable head when the changed tail message was written after the checkpoint", () => {
+		const finalized: LiveContextMessage = { ...stamped[1]!, content: [{ type: "text", text: "finalized" }], updatedAt: at + 20_000 };
+		const next: LiveContextMessage = { role: "user", content: "next turn", ocMessageID: "msg_3", timestamp: 3, updatedAt: at + 30_000 };
+		const result = applyProjection([stamped[0]!, finalized, next], stampedCheckpoint());
+		expect(result.valid).toBe(true);
+		if (!result.valid) return;
+		expect(result.reanchor).toEqual({
+			sourceMessageCount: 1,
+			sourceIds: ["msg_1"],
+			sourceStamps: [sourceStamp(stamped[0]!)],
+			sourceDigest: digestSourcePrefix([stamped[0]!]),
+		});
+		expect(result.messages).toEqual([...stampedCheckpoint().projectedMessages, finalized, next]);
+		expect(result.suffix).toEqual([finalized, next]);
+	});
+
+	test("a re-anchored checkpoint validates against the same history on the next request", () => {
+		const finalized: LiveContextMessage = { ...stamped[1]!, content: [{ type: "text", text: "finalized" }], updatedAt: at + 20_000 };
+		const context = [stamped[0]!, finalized];
+		const result = applyProjection(context, stampedCheckpoint());
+		if (!result.valid || !result.reanchor) throw new Error("expected a re-anchor");
+		const trimmed = { ...stampedCheckpoint(), ...result.reanchor };
+		const again = applyProjection(context, trimmed);
+		expect(again.valid).toBe(true);
+		if (!again.valid) return;
+		expect(again.reanchor).toBeUndefined();
+		expect(again.messages).toEqual(result.messages);
+	});
+
+	test("fails closed when the changed message was not written after the checkpoint", () => {
+		const edited: LiveContextMessage = { ...stamped[1]!, content: [{ type: "text", text: "changed in place" }] };
+		const result = applyProjection([stamped[0]!, edited], stampedCheckpoint());
+		expect(result.valid).toBe(false);
+		expect(result.valid ? "" : result.reason).toBe(PROJECTION_PREFIX_MISMATCH_REASON);
+	});
+
+	test("fails closed when the first source message changed", () => {
+		const head: LiveContextMessage = { ...stamped[0]!, content: "changed head", updatedAt: at + 20_000 };
+		const result = applyProjection([head, stamped[1]!], stampedCheckpoint());
+		expect(result.valid).toBe(false);
+		expect(result.valid ? "" : result.reason).toBe(PROJECTION_PREFIX_MISMATCH_REASON);
+	});
+
+	test("fails closed without per-message stamps (a checkpoint from an older version)", () => {
+		const older = stampedCheckpoint();
+		delete older.sourceStamps;
+		const finalized: LiveContextMessage = { ...stamped[1]!, content: [{ type: "text", text: "finalized" }], updatedAt: at + 20_000 };
+		const result = applyProjection([stamped[0]!, finalized], older);
+		expect(result.valid).toBe(false);
+		expect(result.valid ? "" : result.reason).toBe(PROJECTION_PREFIX_MISMATCH_REASON);
 	});
 });

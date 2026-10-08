@@ -96,6 +96,21 @@ function isMessageArray(value: unknown): value is LiveContextMessage[] {
 	);
 }
 
+/** Per-message stamps (`projection.ts` SourceStamp): a hex digest and a finite `updatedAt`. */
+function isSourceStamps(value: unknown, count: unknown): boolean {
+	return (
+		Array.isArray(value) &&
+		value.length === count &&
+		value.every(
+			(stamp) =>
+				isObject(stamp) &&
+				typeof stamp.digest === "string" &&
+				/^[a-f0-9]{64}$/.test(stamp.digest) &&
+				Number.isFinite(stamp.updatedAt),
+		)
+	);
+}
+
 function isContextEditTrace(value: unknown): value is ContextEditTrace {
 	if (!isObject(value)) return false;
 	const trace = value as Partial<ContextEditTrace>;
@@ -134,6 +149,7 @@ export function isProjectionCheckpoint(value: unknown): value is ProjectionCheck
 		checkpoint.sourceIds.every((id) => typeof id === "string") &&
 		typeof checkpoint.sourceDigest === "string" &&
 		/^[a-f0-9]{64}$/.test(checkpoint.sourceDigest) &&
+		(checkpoint.sourceStamps === undefined || isSourceStamps(checkpoint.sourceStamps, checkpoint.sourceMessageCount)) &&
 		isMessageArray(checkpoint.projectedMessages) &&
 		Number.isFinite(checkpoint.beforeEstimate) &&
 		Number.isFinite(checkpoint.afterEstimate) &&
@@ -237,6 +253,17 @@ export async function loadLiveContextState(directory: string): Promise<LoadedSta
 	if (isObject(parsed) && parsed.budgetCheck !== undefined && !isBudgetCheck(parsed.budgetCheck)) {
 		delete parsed.budgetCheck;
 		repaired = `${path} had an invalid budgetCheck; dropped it, the fixed overhead is measured again.`;
+	}
+	// Malformed per-message stamps cost only tail re-anchoring: the checkpoint keeps working
+	// with the whole-prefix digest and fails closed on a mismatch, as before.
+	if (
+		isObject(parsed) &&
+		isObject(parsed.checkpoint) &&
+		parsed.checkpoint.sourceStamps !== undefined &&
+		!isSourceStamps(parsed.checkpoint.sourceStamps, parsed.checkpoint.sourceMessageCount)
+	) {
+		delete parsed.checkpoint.sourceStamps;
+		repaired = `${path} had invalid sourceStamps; dropped them, tail re-anchoring is off for this checkpoint.`;
 	}
 	if (!isLiveContextState(parsed)) {
 		return { state: initialLiveContextState(), warning: `${path} has an invalid shape; starting clean.` };

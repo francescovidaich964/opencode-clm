@@ -1264,6 +1264,24 @@ export class ClmSession {
 		} else if (this.state.checkpoint) {
 			this.invalidationStreak = 0;
 		}
+		if (projection.valid && projection.reanchor) {
+			// OpenCode rewrote messages of the current turn after the checkpoint was captured
+			// (an assistant message still being finalized). Trim the anchor to the stable head
+			// instead of dropping the revision: the trimmed tail becomes ordinary suffix,
+			// exactly as if the edit had been committed a moment later. Silent by design;
+			// `reanchored` in events.jsonl records it for the panel and for debugging.
+			this.invalidationStreak = 0;
+			const reanchor = projection.reanchor;
+			const revision = this.state.revision;
+			await this.updateState(
+				(state) =>
+					state.checkpoint && state.revision === revision
+						? { ...state, checkpoint: { ...state.checkpoint, ...reanchor } }
+						: state,
+				true,
+			).catch(() => undefined);
+			await this.log({ event: "reanchored", revision, sourceMessageCount: reanchor.sourceMessageCount });
+		}
 		const origin = this.forkOrigin;
 		this.forkOrigin = undefined;
 		if (origin && !noticesOnly && !this.state.checkpoint && this.state.revision === 0 && (await this.restoreFromFork(origin, source))) {

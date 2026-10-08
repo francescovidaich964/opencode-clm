@@ -4,6 +4,8 @@ export type LiveContextMessage = {
 	role: string;
 	content?: unknown;
 	timestamp?: number;
+	/** OpenCode's `info.time.updated`: the in-place write marker used for tail re-anchoring. */
+	updatedAt?: number;
 	[key: string]: unknown;
 };
 
