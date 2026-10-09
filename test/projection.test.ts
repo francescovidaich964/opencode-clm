@@ -11,6 +11,7 @@ import {
 	PROJECTION_PREFIX_MISMATCH_REASON,
 	PROJECTION_SOURCE_IDS_REASON,
 	sourceStamp,
+	stripSystemReminders,
 	type ProjectionCheckpoint,
 } from "../src/projection.ts";
 import type { LiveContextMessage } from "../src/types.ts";
@@ -340,5 +341,83 @@ describe("tail re-anchoring", () => {
 		const result = applyProjection([stamped[0]!, finalized], older);
 		expect(result.valid).toBe(false);
 		expect(result.valid ? "" : result.reason).toBe(PROJECTION_PREFIX_MISMATCH_REASON);
+	});
+
+	const REMINDER = "<system-reminder>\nYour operational mode has changed from plan to build.\nYou are no longer in read-only mode.\n</system-reminder>";
+
+	test("re-anchors a reminder-only edit even without a write time (mode switch)", () => {
+		const stable: LiveContextMessage = { role: "user", content: "intro", ocMessageID: "msg_0", timestamp: 0, updatedAt: at - 20_000 };
+		const withReminder: LiveContextMessage = {
+			role: "user",
+			content: [{ type: "text", text: `task\n\n${REMINDER}` }],
+			ocMessageID: "msg_1",
+			timestamp: 1,
+			updatedAt: at - 10_000,
+		};
+		const assistant: LiveContextMessage = { role: "assistant", content: [{ type: "text", text: "reply" }], ocMessageID: "msg_2", timestamp: 2, updatedAt: at - 10_000 };
+		const checkpoint = createProjectionCheckpoint({
+			revision: 1,
+			sourceMessages: [stable, withReminder, assistant],
+			projectedMessages: [stable, { role: "custom", customType: "clm-note", content: "summary" }],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+			createdAt: "2026-08-29T00:00:00.000Z",
+		});
+		const withoutReminder: LiveContextMessage = { ...withReminder, content: [{ type: "text", text: "task" }] };
+		const result = applyProjection([stable, withoutReminder, assistant], checkpoint);
+		expect(result.valid).toBe(true);
+		if (!result.valid) return;
+		expect(result.reanchor?.sourceMessageCount).toBe(1);
+		expect(result.messages).toEqual([...checkpoint.projectedMessages, withoutReminder, assistant]);
+	});
+
+	test("re-anchors a reminder added to a message captured without one", () => {
+		const stable: LiveContextMessage = { role: "user", content: "intro", ocMessageID: "msg_0", timestamp: 0, updatedAt: at - 20_000 };
+		const plain: LiveContextMessage = { role: "user", content: [{ type: "text", text: "task" }], ocMessageID: "msg_1", timestamp: 1, updatedAt: at - 10_000 };
+		const checkpoint = createProjectionCheckpoint({
+			revision: 1,
+			sourceMessages: [stable, plain],
+			projectedMessages: [stable, { role: "custom", customType: "clm-note", content: "summary" }],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+			createdAt: "2026-08-29T00:00:00.000Z",
+		});
+		const withReminder: LiveContextMessage = { ...plain, content: [{ type: "text", text: `task\n\n${REMINDER}` }] };
+		const result = applyProjection([stable, withReminder], checkpoint);
+		expect(result.valid).toBe(true);
+		if (!result.valid) return;
+		expect(result.reanchor?.sourceMessageCount).toBe(1);
+	});
+
+	test("fails closed when a user message's real text changed without a write time", () => {
+		const stable: LiveContextMessage = { role: "user", content: "intro", ocMessageID: "msg_0", timestamp: 0, updatedAt: at - 20_000 };
+		const plain: LiveContextMessage = { role: "user", content: [{ type: "text", text: "task" }], ocMessageID: "msg_1", timestamp: 1, updatedAt: at - 10_000 };
+		const checkpoint = createProjectionCheckpoint({
+			revision: 1,
+			sourceMessages: [stable, plain],
+			projectedMessages: [stable],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+			createdAt: "2026-08-29T00:00:00.000Z",
+		});
+		const edited: LiveContextMessage = { ...plain, content: [{ type: "text", text: "task, but edited for real" }] };
+		const result = applyProjection([stable, edited], checkpoint);
+		expect(result.valid).toBe(false);
+		expect(result.valid ? "" : result.reason).toBe(PROJECTION_PREFIX_MISMATCH_REASON);
+	});
+
+	test("reminder stripping normalizes whitespace and drops emptied parts", () => {
+		const message: LiveContextMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "a\n\n<system-reminder>\nx\n</system-reminder>\n\nb" },
+				{ type: "text", text: "<system-reminder>only</system-reminder>" },
+			],
+			ocMessageID: "msg_1",
+		};
+		expect(stripSystemReminders(message).content).toEqual([{ type: "text", text: "a\n\nb" }]);
 	});
 });

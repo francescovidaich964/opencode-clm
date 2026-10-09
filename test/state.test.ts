@@ -122,6 +122,7 @@ describe("state validation", () => {
 		["stamps length unlike count", { sourceStamps: [{ digest: "a".repeat(64), updatedAt: 1 }] }],
 		["stamp digest not hex", { sourceStamps: [{ digest: "nope", updatedAt: 1 }, { digest: "a".repeat(64), updatedAt: 1 }] }],
 		["stamp updatedAt not finite", { sourceStamps: [{ digest: "a".repeat(64), updatedAt: "now" }, { digest: "a".repeat(64), updatedAt: 1 }] }],
+		["stamp strippedDigest not hex", { sourceStamps: [{ digest: "a".repeat(64), updatedAt: 1, strippedDigest: "nope" }, { digest: "a".repeat(64), updatedAt: 1 }] }],
 		["numeric content", { projectedMessages: [{ role: "user", content: 5 }, { role: "user", content: "x" }] }],
 		["untyped content part", { projectedMessages: [{ role: "user", content: [{ text: "x" }] }, { role: "user", content: "x" }] }],
 	])("rejects a checkpoint with %s", (_name, patch) => {

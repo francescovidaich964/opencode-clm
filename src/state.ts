@@ -106,7 +106,9 @@ function isSourceStamps(value: unknown, count: unknown): boolean {
 				isObject(stamp) &&
 				typeof stamp.digest === "string" &&
 				/^[a-f0-9]{64}$/.test(stamp.digest) &&
-				Number.isFinite(stamp.updatedAt),
+				Number.isFinite(stamp.updatedAt) &&
+				(stamp.strippedDigest === undefined ||
+					(typeof stamp.strippedDigest === "string" && /^[a-f0-9]{64}$/.test(stamp.strippedDigest))),
 		)
 	);
 }

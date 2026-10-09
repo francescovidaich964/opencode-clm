@@ -42,6 +42,13 @@ export type EstimateUnit = "characters" | "tokens";
 export interface SourceStamp {
 	digest: string;
 	updatedAt: number;
+	/**
+	 * Digest of the same message with OpenCode's `<system-reminder>` blocks removed
+	 * (whitespace-normalized). OpenCode appends and removes mode-change reminders on user
+	 * messages between requests without moving any write-time field; a change confined to
+	 * those blocks is attributable against this fingerprint.
+	 */
+	strippedDigest?: string;
 }
 
 export interface ProjectionCheckpoint {
@@ -107,6 +114,48 @@ function sourceDigestForm(message: LiveContextMessage): LiveContextMessage {
 	};
 }
 
+const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+/** Whitespace-normalized text without OpenCode's reminder blocks, for the stripped fingerprint. */
+function normalizeReminderFingerprint(text: string): string {
+	return text
+		.replace(/\r\n/g, "\n")
+		.replace(SYSTEM_REMINDER_RE, "")
+		.replace(/\n{2,}/g, "\n\n")
+		.trim();
+}
+
+/**
+ * The message with OpenCode's `<system-reminder>` blocks removed from its text parts; parts
+ * that become empty are dropped. OpenCode appends and removes mode-change reminders on user
+ * messages between requests without touching any write-time field, so a digest over this
+ * form tells a reminder-only edit apart from a real content change.
+ */
+export function stripSystemReminders(message: LiveContextMessage): LiveContextMessage {
+	const content = message.content;
+	if (!Array.isArray(content)) return message;
+	const stripped: unknown[] = [];
+	for (const part of content) {
+		if (!part || typeof part !== "object") {
+			stripped.push(part);
+			continue;
+		}
+		const block = part as Record<string, unknown>;
+		if (block.type !== "text" || typeof block.text !== "string") {
+			stripped.push(block);
+			continue;
+		}
+		const text = normalizeReminderFingerprint(block.text);
+		if (text !== "") stripped.push({ ...block, text });
+	}
+	return { ...message, content: stripped };
+}
+
+/** `digestSourceMessage` of the message without OpenCode's system-reminder blocks. */
+export function digestSourceMessageWithoutReminders(message: LiveContextMessage): string {
+	return digestMessages([sourceDigestForm(stripSystemReminders(message))]);
+}
+
 /**
  * Digest a raw source prefix in a form OpenCode's prune cannot change: every `toolResult`
  * keeps only role, toolCallId, toolName, isError and ocMessageID. Content is dropped for
@@ -122,11 +171,13 @@ export function digestSourceMessage(message: LiveContextMessage): string {
 	return digestMessages([sourceDigestForm(message)]);
 }
 
-/** A message's stamp: its content digest and the write time OpenCode last wrote. */
+/** A message's stamp: its content digest, the write time OpenCode last wrote, and the
+ * reminder-stripped fingerprint. */
 export function sourceStamp(message: LiveContextMessage): SourceStamp {
 	return {
 		digest: digestSourceMessage(message),
 		updatedAt: typeof message.updatedAt === "number" ? message.updatedAt : 0,
+		strippedDigest: digestSourceMessageWithoutReminders(message),
 	};
 }
 
@@ -205,13 +256,14 @@ export function applyProjection(
 }
 
 /**
- * A mismatch OpenCode itself caused. Every changed message must have been rewritten after
- * the checkpoint captured it (its write time — `time.completed`/`updated`, not `created` —
- * moved past the stamp): that is the tail of the current turn still being finalized, not a
- * revert, a compaction or a foreign transform — those change ids or content without moving
- * the write time, and stay fail-closed. The anchor is trimmed to the last stable message;
- * the trimmed tail becomes ordinary suffix, the same contract as pi-clm's rebasing for
- * appended messages.
+ * A mismatch OpenCode itself caused. Every changed message must be explained by an
+ * OpenCode write: either its write time (`time.completed`/`updated`, not `created`) moved
+ * past the stamp, or the change is confined to OpenCode's `<system-reminder>` mode-change
+ * blocks (verified against the reminder-stripped per-message digest). That is the tail of
+ * the current turn still being finalized or a mode switch — not a revert, a compaction or
+ * a foreign transform, which change ids or content in ways neither check explains and stay
+ * fail-closed. The anchor is trimmed to the last stable message; the trimmed tail becomes
+ * ordinary suffix, the same contract as pi-clm's rebasing for appended messages.
  */
 function reanchorTail(
 	rawMessages: readonly LiveContextMessage[],
@@ -223,9 +275,15 @@ function reanchorTail(
 	const changed = prefix.map((message, index) => digestSourceMessage(message) !== stamps[index]!.digest);
 	const first = changed.indexOf(true);
 	if (first <= 0) return undefined;
-	const attributable = prefix.every((message, index) =>
-		!changed[index] || (typeof message.updatedAt === "number" && message.updatedAt > stamps[index]!.updatedAt),
-	);
+	const attributable = prefix.every((message, index) => {
+		if (!changed[index]) return true;
+		const stamp = stamps[index]!;
+		if (typeof message.updatedAt === "number" && message.updatedAt > stamp.updatedAt) return true;
+		// OpenCode appends and removes `<system-reminder>` blocks (mode changes) on user
+		// messages without moving any write time; a change confined to those blocks is still
+		// an OpenCode edit. Everything else fails closed.
+		return typeof stamp.strippedDigest === "string" && digestSourceMessageWithoutReminders(message) === stamp.strippedDigest;
+	});
 	if (!attributable) return undefined;
 	const stable = prefix.slice(0, first);
 	const reanchor: ProjectionReanchor = {

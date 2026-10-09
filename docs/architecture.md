@@ -199,14 +199,17 @@ error is a line in `events.jsonl`.
   place) therefore does not discard a checkpoint; a revert removes messages, changes the
   ids, and drops it.
 - **Tail re-anchoring.** OpenCode keeps writing message objects after the transform returns
-  (an assistant message being finalized, turn diffs attached to the user message), so a
-  checkpoint taken mid-turn digests a tail that is still changing. When the whole-prefix
-  digest no longer matches but every changed message moved its `time.updated` past the
-  captured stamp — OpenCode itself rewrote it — the anchor is trimmed to the last stable
-  message and the trimmed tail flows as ordinary suffix, with a `reanchored` event. This is
-  the same contract as pi-clm's rebasing for appended messages; the revision is not
-  dropped and the model gets no notice. Anything else (a revert, a compaction, another
-  plugin rewriting in memory, which does not move `time.updated`) still fails closed.
+  (an assistant message being finalized) and appends or removes `<system-reminder>`
+  mode-change blocks on user messages, so a checkpoint can digest content that changes
+  without a revert. When the whole-prefix digest no longer matches but every changed
+  message is explained by OpenCode itself — its write time (`time.completed`/`updated`)
+  moved past the captured stamp, or the change is confined to `<system-reminder>` blocks
+  (verified against a reminder-stripped per-message fingerprint) — the anchor is trimmed to
+  the last stable message and the trimmed tail flows as ordinary suffix, with a
+  `reanchored` event. This is the same contract as pi-clm's rebasing for appended messages;
+  the revision is not dropped and the model gets no notice. Anything else (a revert, a
+  compaction, another plugin rewriting in memory, which moves no write time and is not a
+  reminder-only edit) still fails closed.
 - **Revert and fork.** Each accepted checkpoint is also kept in `checkpoints/rN.json` (the
   newest 8). When the active revision no longer fits (a revert cut into its prefix), the
   newest older checkpoint that still fits becomes the next revision, with a notice and a
