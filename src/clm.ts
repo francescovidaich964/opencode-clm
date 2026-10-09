@@ -38,7 +38,6 @@
  * calibrator learns only from requests whose full scope (system prompt and tool schemas
  * included) was estimated; without those sizes it stays at 1.
  */
-import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -261,11 +260,6 @@ export class ClmSession {
 	private pendingAlerts: string[] = [];
 	/** The settings warning last shown to the user, so a new or changed one toasts once. */
 	private shownSettingsWarning?: string;
-	/**
-	 * Per-process seed of the stable document id. Fresh on every open, so a document id never
-	 * repeats even when a corrupt state file resets the revision counter to 0.
-	 */
-	private readonly nonce = randomUUID();
 	private readonly tokenCache = new WeakMap<LiveContextMessage, number>();
 	private saving: Promise<void> = Promise.resolve();
 	private running: Promise<unknown> = Promise.resolve();
@@ -1349,9 +1343,10 @@ export class ClmSession {
 		const snapshot = noticesOnly ? undefined : renderContextDocument(effective, {
 			revision: this.state.revision,
 			protectedIndexes: new Set<number>(),
-			// Constant until the next accepted edit or reset, so header ids read on one call
-			// remain valid on the next; bodies are escaped accordingly.
-			documentSeed: `${this.sessionID}:${this.nonce}:${checkpoint?.sourceDigest ?? "raw"}`,
+			// Constant until the next accepted edit or reset — and across process restarts,
+			// as pi-clm's is — so header ids read on one call remain valid on the next;
+			// bodies are escaped accordingly.
+			documentSeed: `${this.sessionID}:${checkpoint?.sourceDigest ?? "raw"}`,
 		});
 		if (snapshot) {
 			try {

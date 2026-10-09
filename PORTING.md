@@ -56,3 +56,25 @@ Not ported, by reason (OpenCode v1.18.34 source):
   the channel; the server needs the same plugin version.
 - Forks restore the origin's revision but not its annotations; `trailer` misses failed
   tool calls, because OpenCode skips `tool.execute.after` for them (`session/tools.ts:111-125`).
+
+## Fork additions (francescovidaich964/opencode-clm)
+
+Two fixes on top of upstream, both in the projection's fail-closed path; neither changes
+the model-facing protocol, the ported strategy or the checkpoint semantics.
+
+- **Per-message stamps and tail re-anchoring.** OpenCode keeps writing message objects
+  after `messages.transform` returns (an assistant message being finalized) and appends or
+  removes `<system-reminder>` mode-change blocks on user messages. A checkpoint can
+  therefore digest content that changes without a revert. `sourceStamps` (per-message
+  digest, captured write time, reminder-stripped fingerprint) let `applyProjection`
+  attribute such a change and trim the anchor to the stable head (`reanchored` event)
+  instead of dropping the revision; anything else still fails closed. pi-clm needs none of
+  this because Pi's log is immutable. See bcmyguest/opencode-clm#3.
+- **Restart-stable document nonce.** The seed is `sessionId:sourceDigest`, as pi-clm's is,
+  without upstream's per-process random component, so block ids the model read survive an
+  OpenCode restart.
+
+Recommended paper-parity configuration for the plugin entry: `"budget": "window"`
+(upstream defaults to 50% of the window minus its output limit; the paper's harness
+budgets the window minus `max_tokens`), and for paper-faithful runs `/clm config
+one-tool on`, `/clm config trailer on`, `/clm config cap 10000:0.5`.
