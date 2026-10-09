@@ -256,6 +256,11 @@ export async function loadLiveContextState(directory: string): Promise<LoadedSta
 		delete parsed.budgetCheck;
 		repaired = `${path} had an invalid budgetCheck; dropped it, the fixed overhead is measured again.`;
 	}
+	// A malformed outcome costs only itself: the panel loses one line, the checkpoint stays.
+	if (isObject(parsed) && parsed.lastOutcome !== undefined && !isOutcome(parsed.lastOutcome)) {
+		delete parsed.lastOutcome;
+		repaired = `${path} had an invalid lastOutcome; dropped it, the last outcome is unknown.`;
+	}
 	// Malformed per-message stamps cost only tail re-anchoring: the checkpoint keeps working
 	// with the whole-prefix digest and fails closed on a mismatch, as before.
 	if (
@@ -268,9 +273,24 @@ export async function loadLiveContextState(directory: string): Promise<LoadedSta
 		repaired = `${path} had invalid sourceStamps; dropped them, tail re-anchoring is off for this checkpoint.`;
 	}
 	if (!isLiveContextState(parsed)) {
-		return { state: initialLiveContextState(), warning: `${path} has an invalid shape; starting clean.` };
+		return { state: initialLiveContextState(), warning: `${path} has an invalid shape (${stateProblem(parsed)}); starting clean.` };
 	}
 	return repaired ? { state: parsed, repaired } : { state: parsed };
+}
+
+/** Names the first state check `value` fails, so a load warning locates the bad field. */
+function stateProblem(value: unknown): string {
+	if (!isObject(value)) return "not an object";
+	if (value.version !== STATE_VERSION) return `unsupported version ${JSON.stringify(value.version)}`;
+	if (typeof value.enabled !== "boolean") return "enabled is not a boolean";
+	if (!isCount(value.revision)) return "revision is not a count";
+	if (value.checkpoint !== undefined) {
+		if (!isProjectionCheckpoint(value.checkpoint)) return "checkpoint is invalid";
+		if (value.checkpoint.revision !== value.revision) return "checkpoint revision does not match the state revision";
+	}
+	if (value.lastOutcome !== undefined && !isOutcome(value.lastOutcome)) return "lastOutcome is invalid";
+	if (value.budgetCheck !== undefined && !isBudgetCheck(value.budgetCheck)) return "budgetCheck is invalid";
+	return "unknown";
 }
 
 /**

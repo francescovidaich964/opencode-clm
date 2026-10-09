@@ -59,7 +59,7 @@ Not ported, by reason (OpenCode v1.18.34 source):
 
 ## Fork additions (francescovidaich964/opencode-clm)
 
-Two fixes on top of upstream, both in the projection's fail-closed path; neither changes
+Three fixes on top of upstream, all in the projection's fail-closed path; none changes
 the model-facing protocol, the ported strategy or the checkpoint semantics.
 
 - **Per-message stamps and tail re-anchoring.** OpenCode keeps writing message objects
@@ -73,6 +73,11 @@ the model-facing protocol, the ported strategy or the checkpoint semantics.
 - **Restart-stable document nonce.** The seed is `sessionId:sourceDigest`, as pi-clm's is,
   without upstream's per-process random component, so block ids the model read survive an
   OpenCode restart.
+- **Load repairs keep the checkpoint.** A malformed optional field in `state.json` used to
+  discard the whole state ("invalid shape; starting clean"), which can flood a session
+  past its window on the next request. `loadLiveContextState` now drops an invalid
+  `lastOutcome` (as it already did for `budgetCheck` and `sourceStamps`) and keeps the
+  checkpoint; if a core field is invalid the warning names it.
 
 Recommended paper-parity configuration for the plugin entry: `"budget": "window"`
 (upstream defaults to 50% of the window minus its output limit; the paper's harness

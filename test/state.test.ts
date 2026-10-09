@@ -280,4 +280,30 @@ describe("budgetCheck", () => {
 		expect(loaded.repaired).toContain("invalid sourceStamps");
 		await rm(directory, { recursive: true, force: true });
 	});
+
+	test("a malformed lastOutcome is dropped; the checkpoint is kept", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "clm-state-"));
+		const state = applied(4);
+		const broken = structuredClone(state);
+		broken.lastOutcome = { ...state.lastOutcome!, message: 42 as unknown as string };
+		await writeFile(join(directory, STATE_FILE), JSON.stringify(broken));
+		const loaded = await loadLiveContextState(directory);
+		const expected = structuredClone(state);
+		delete expected.lastOutcome;
+		expect(loaded.state).toEqual(expected);
+		expect(loaded.warning).toBeUndefined();
+		expect(loaded.repaired).toContain("invalid lastOutcome");
+		await rm(directory, { recursive: true, force: true });
+	});
+
+	test("the clean-start warning names the failing field", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "clm-state-"));
+		const broken = applied(4);
+		broken.revision = 5;
+		await writeFile(join(directory, STATE_FILE), JSON.stringify(broken));
+		const loaded = await loadLiveContextState(directory);
+		expect(loaded.state).toEqual(initialLiveContextState());
+		expect(loaded.warning).toContain("checkpoint revision does not match the state revision");
+		await rm(directory, { recursive: true, force: true });
+	});
 });
